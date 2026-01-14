@@ -1,4 +1,4 @@
-# WSPR Beacon 
+# ESP32 WSPR Beacon 
 This project is related to a Tech Minds video on how to build a WSPR beacon using an Si5351 and an ESP32 module. The files wihtin this repo are for use with Visual Studio Code.
 
 Like this project? Send me a dono here: https://buymeacoffee.com/techminds_matt  

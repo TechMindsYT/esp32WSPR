@@ -15,4 +15,4 @@ US:https://amzn.to/4jKjeHt
 ## Usage
 Create a new PlatformIO project within Visual studio code, then replace main.cpp and platformio.ini with those in this repo. The board details wihtin the platformio.ini file are specific for the linked ESP32 module above.  
 
-Once firmware has been loaded onto ESP32 use a wifi device to connect to "TechMinds-ESP32WSPR". This is open, no password needed. Then bavigate to: http://ESP32WSPR.local where you can change the wifi to connect to your home network, enter your callsign and assign a valid Maindenhead locator.
+Once firmware has been loaded onto ESP32 use a wifi device to connect to "TechMinds-ESP32WSPR". This is open, no password needed. Then navigate to: http://ESP32WSPR.local where you can change the wifi to connect to your home network, enter your callsign and assign a valid Maindenhead locator.

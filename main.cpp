@@ -10,11 +10,23 @@
 
 #include <si5351.h>
 #include <JTEncode.h>
+#ifdef HAS_NEOPIXEL
 #include <Adafruit_NeoPixel.h>
+#endif
 
+#ifdef HAS_NEOPIXEL
 // ---------- LED SETTINGS ----------
 #define LED_PIN 48
 Adafruit_NeoPixel rgb(1, LED_PIN, NEO_GRBW + NEO_KHZ800);
+#endif
+
+// ---------- I2C PINS ----------
+#ifndef I2C_SDA
+#define I2C_SDA 21  // fallback
+#endif
+#ifndef I2C_SCL
+#define I2C_SCL 22  // fallback
+#endif
 
 // ---------- HOSTNAME ----------
 static const char* HOSTNAME = "ESP32WSPR";   // -> http://ESP32WSPR.local/
@@ -47,6 +59,7 @@ static const BandDef BANDS[] = {
   {"12m",  24924600.0},
   {"10m",  28124600.0},
   {"6m",   50293000.0},
+  {"2m",  144488500.0}
 };
 static const size_t NUM_BANDS = sizeof(BANDS) / sizeof(BANDS[0]);
 
@@ -76,9 +89,21 @@ size_t bandIndex = 3; // default 40m
 // per-band calibration offsets (Hz)
 double bandCalHz[NUM_BANDS];
 
+// per-band clock output assignment
+uint8_t bandClockOut[NUM_BANDS];
+
 // TX control
 bool txEnabled = false;      // default OFF
 bool txEverySlot = false;    // default alternate
+
+// Si5351 clock output selection
+uint8_t si5351Clock = SI5351_CLK0;  // default CLK0 (kept for backward compatibility)
+
+#ifdef HAS_NEOPIXEL
+// LED control
+bool ledEnabled = true;      // default ON
+bool isTxActive = false;     // track TX state
+#endif
 
 // NTP server
 String ntpServer = DEFAULT_NTP_SERVER;
@@ -120,28 +145,44 @@ static String keyCalForBand(size_t idx) {
 
 // ---------- LED CONTROL ----------
 void ledOff() {
+#ifdef HAS_NEOPIXEL
   rgb.setPixelColor(0, 0, 0, 0);
   rgb.show();
+#endif
 }
 void ledIdle() {
-  rgb.setPixelColor(0, 0, 20, 0);
-  rgb.show();
+#ifdef HAS_NEOPIXEL
+  if (ledEnabled) {
+    rgb.setPixelColor(0, 0, 20, 0);
+    rgb.show();
+  }
+#endif
 }
 void ledTx() {
-  rgb.setPixelColor(0, 20, 0, 0);
-  rgb.show();
+#ifdef HAS_NEOPIXEL
+  if (ledEnabled) {
+    rgb.setPixelColor(0, 20, 0, 0);
+    rgb.show();
+  }
+#endif
 }
 
 // ---------- RF CONTROL ----------
 void rfOff() {
-  si5351.output_enable(SI5351_CLK0, 0);
-  si5351.set_freq(0, SI5351_CLK0);
+  si5351.output_enable((si5351_clock)bandClockOut[bandIndex], 0);
+  si5351.set_freq(0, (si5351_clock)bandClockOut[bandIndex]);
   Serial.println("RF state: OFF");
+#ifdef HAS_NEOPIXEL
+  isTxActive = false;
+#endif
   ledIdle();
 }
 void rfOn() {
-  si5351.output_enable(SI5351_CLK0, 1);
+  si5351.output_enable((si5351_clock)bandClockOut[bandIndex], 1);
   Serial.println("RF state: ON");
+#ifdef HAS_NEOPIXEL
+  isTxActive = true;
+#endif
   ledTx();
 }
 
@@ -159,6 +200,12 @@ void loadSettings() {
   bandCalHz[8]  =  0.0;   // 12m
   bandCalHz[9]  =  0.0;   // 10m
   bandCalHz[10] =  0.0;   // 6m
+  bandCalHz[11] =  0.0;   // 2m
+
+  // Default per-band clock outputs (all CLK0)
+  for (size_t i = 0; i < NUM_BANDS; i++) {
+    bandClockOut[i] = SI5351_CLK0;
+  }
 
   prefs.begin("esp32wspr", true);
 
@@ -178,8 +225,20 @@ void loadSettings() {
     if (prefs.isKey(k.c_str())) bandCalHz[i] = prefs.getDouble(k.c_str(), bandCalHz[i]);
   }
 
+  // per-band clock outputs
+  for (size_t i = 0; i < NUM_BANDS; i++) {
+    String k = "clkout" + String((int)i);
+    if (prefs.isKey(k.c_str())) {
+      bandClockOut[i] = prefs.getUChar(k.c_str(), SI5351_CLK0);
+    }
+  }
+
   txEnabled   = prefs.getBool("txen", false);    // default OFF
   txEverySlot = prefs.getBool("txall", false);   // default alternate
+  si5351Clock = prefs.getUChar("clk", SI5351_CLK0); // default CLK0
+#ifdef HAS_NEOPIXEL
+  ledEnabled  = prefs.getBool("leden", true);    // default ON
+#endif
   ntpServer   = prefs.getString("ntp", DEFAULT_NTP_SERVER);
 
   prefs.end();
@@ -202,8 +261,18 @@ void saveSettings() {
     prefs.putDouble(k.c_str(), bandCalHz[i]);
   }
 
+  // Save per-band clock outputs
+  for (size_t i = 0; i < NUM_BANDS; i++) {
+    String k = "clkout" + String((int)i);
+    prefs.putUChar(k.c_str(), bandClockOut[i]);
+  }
+
   prefs.putBool("txen", txEnabled);
   prefs.putBool("txall", txEverySlot);
+  prefs.putUChar("clk", si5351Clock);
+#ifdef HAS_NEOPIXEL
+  prefs.putBool("leden", ledEnabled);
+#endif
   prefs.putString("ntp", ntpServer);
 
   prefs.end();
@@ -361,9 +430,11 @@ R"HTML(<!doctype html>
   .bandRow td:nth-child(2){ width:70px; font-weight:800; }
   .bandRow td:nth-child(3){ color:var(--muted); }
   .bandRow td:nth-child(4){ width:160px; }
+  .bandRow td:nth-child(5){ width:90px; }
   .bandActive{ outline:2px solid rgba(56,189,248,.35); box-shadow:0 0 0 3px rgba(56,189,248,.08); }
   .radio{ width:18px; height:18px; accent-color: #38bdf8; }
   .calInput{ width:100%; }
+  .clkSelect{ width:100%; }
   details summary{
     cursor:pointer; user-select:none; font-weight:800; color:#dbeafe; list-style:none;
   }
@@ -423,6 +494,38 @@ R"HTML(<!doctype html>
         <button type="button" onclick="saveNtp()">Save NTP</button>
         <button type="button" onclick="syncTime()">Sync Time Now</button>
       </div>
+
+      <label>Si5351 Clock Output</label>
+      <select id="clkout">
+        <option value="0">CLK0</option>
+        <option value="1">CLK1</option>
+        <option value="2">CLK2</option>
+      </select>
+
+      <div class="btnline">
+        <button type="button" onclick="saveClk()">Save Clock</button>
+      </div>
+
+)HTML"
+#ifdef HAS_NEOPIXEL
++ R"HTML(
+      <label>Status LED</label>
+      <div class="tog">
+        <div>
+          <div class="big">NeoPixel On/Off</div>
+        </div>
+        <label class="switch">
+          <input id="leden" type="checkbox"/>
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="btnline">
+        <button type="button" onclick="saveLed()">Save LED</button>
+      </div>
+)HTML"
+#endif
++ R"HTML(
     </div>
 
     <div class="card">
@@ -529,7 +632,11 @@ function currentUtcEpoch(){
 }
 
 function wireFormLock(){
-  const ids = ['call','loc','pwr','txen','txall','ntp'];
+  const ids = ['call','loc','pwr','txen','txall',)HTML"
+#ifdef HAS_NEOPIXEL
++ R"HTML('leden',)HTML"
+#endif
++ R"HTML('ntp'];
   ids.forEach(id=>{
     const el = document.getElementById(id);
     el.addEventListener('input', ()=>{ formLocked = true; });
@@ -584,10 +691,25 @@ function buildBandPanel(){
     cal.addEventListener('input', ()=>{ formLocked = true; });
     tdCal.appendChild(cal);
 
+    const tdClk = document.createElement('td');
+    const clkSel = document.createElement('select');
+    clkSel.id = `clkout_${idx}`;
+    clkSel.className = 'clkSelect';
+    ['CLK0', 'CLK1', 'CLK2'].forEach((name, clkIdx)=>{
+      const opt = document.createElement('option');
+      opt.value = String(clkIdx);
+      opt.textContent = name;
+      opt.selected = (b.clk_out ?? 0) === clkIdx;
+      clkSel.appendChild(opt);
+    });
+    clkSel.addEventListener('change', ()=>{ formLocked = true; });
+    tdClk.appendChild(clkSel);
+
     tr.appendChild(tdRadio);
     tr.appendChild(tdName);
     tr.appendChild(tdFreq);
     tr.appendChild(tdCal);
+    tr.appendChild(tdClk);
     tbl.appendChild(tr);
   });
 
@@ -602,7 +724,15 @@ function fillFormOnce(){
   document.getElementById('pwr').value = last.pwr_dbm ?? 10;
   document.getElementById('txen').checked = !!last.tx_enabled;
   document.getElementById('txall').checked = !!last.tx_every_slot;
+)HTML"
+#ifdef HAS_NEOPIXEL
++ R"HTML(
+  document.getElementById('leden').checked = !!last.led_enabled;
+)HTML"
+#endif
++ R"HTML(
   document.getElementById('ntp').value = last.ntp_server || 'pool.ntp.org';
+  document.getElementById('clkout').value = String(last.si5351_clock ?? 0);
   buildBandPanel();
 }
 
@@ -710,6 +840,14 @@ async function syncTime(){
   await refresh(true);
 }
 
+async function saveClk(){
+  const clk = document.getElementById('clkout').value || '0';
+  const body = new URLSearchParams({clk});
+  await fetch('/save_clk', {method:'POST', body});
+  await refresh(true);
+  alert('Saved clock output.');
+}
+
 function getActiveBandIndex(){
   const r = document.querySelector('input[name="activeBand"]:checked');
   return r ? r.value : null;
@@ -735,6 +873,10 @@ async function saveWspr(){
       const el = document.getElementById(`cal_${idx}`);
       const v = el ? (el.value || '0') : '0';
       body.append(`cal_${idx}`, v);
+      
+      const clkEl = document.getElementById(`clkout_${idx}`);
+      const clkV = clkEl ? (clkEl.value || '0') : '0';
+      body.append(`clkout_${idx}`, clkV);
     });
   }
 
@@ -744,6 +886,21 @@ async function saveWspr(){
   alert('Saved WSPR settings.');
 }
 
+)HTML"
+#ifdef HAS_NEOPIXEL
++ R"HTML(
+async function saveLed(){
+  const leden = document.getElementById('leden').checked ? '1' : '0';
+  const body = new URLSearchParams({leden});
+  await fetch('/save_led', {method:'POST', body});
+  formLocked = false;
+  await refresh(true);
+  alert('Saved LED setting.');
+}
+
+)HTML"
+#endif
++ R"HTML(
 async function reboot(){
   await fetch('/reboot', {method:'POST'});
   alert('Rebooting…');
@@ -798,6 +955,10 @@ void handleStatus() {
 
   json += "\"tx_enabled\":" + String(txEnabled ? "true" : "false") + ",";
   json += "\"tx_every_slot\":" + String(txEverySlot ? "true" : "false") + ",";
+  json += "\"si5351_clock\":" + String(si5351Clock) + ",";
+#ifdef HAS_NEOPIXEL
+  json += "\"led_enabled\":" + String(ledEnabled ? "true" : "false") + ",";
+#endif
 
   json += "\"ntp_server\":\"" + htmlEscape(ntpServer) + "\",";
 
@@ -812,6 +973,7 @@ void handleStatus() {
     json += "\"name\":\"" + String(BANDS[i].name) + "\",";
     json += "\"dial_hz\":" + String(BANDS[i].dial_hz, 1) + ",";
     json += "\"cal_hz\":" + String(bandCalHz[i], 1) + ",";
+    json += "\"clk_out\":" + String(bandClockOut[i]) + ",";
     json += "\"active\":" + String(i == bandIndex ? "true" : "false");
     json += "}";
   }
@@ -895,6 +1057,17 @@ void handleSaveWspr() {
     }
   }
 
+  // parse per-band clock output fields (clkout_0..clkout_11)
+  for (size_t i = 0; i < NUM_BANDS; i++) {
+    String k = "clkout_" + String((int)i);
+    if (server.hasArg(k)) {
+      int clk = server.arg(k).toInt();
+      if (clk >= 0 && clk <= 2) {
+        bandClockOut[i] = (clk == 0) ? SI5351_CLK0 : (clk == 1) ? SI5351_CLK1 : SI5351_CLK2;
+      }
+    }
+  }
+
   CALLSIGN  = call;
   LOCATOR   = loc;
   POWER_DBM = (uint8_t)pwr;
@@ -911,6 +1084,33 @@ void handleSyncTime() {
   bool ok = syncNtpTime();
   server.send(200, "text/plain", ok ? "OK" : "FAIL");
 }
+
+void handleSaveClk() {
+  if (!server.hasArg("clk")) { server.send(400, "text/plain", "Missing clk"); return; }
+  int clk = server.arg("clk").toInt();
+  if (clk < 0 || clk > 2) { server.send(400, "text/plain", "Invalid clock"); return; }
+  si5351Clock = (clk == 0) ? SI5351_CLK0 : (clk == 1) ? SI5351_CLK1 : SI5351_CLK2;
+  saveSettings();
+  server.send(200, "text/plain", "OK");
+}
+
+#ifdef HAS_NEOPIXEL
+void handleSaveLed() {
+  bool newLedEn = server.hasArg("leden") ? (server.arg("leden") == "1") : ledEnabled;
+  ledEnabled = newLedEn;
+  saveSettings();
+  if (!ledEnabled) {
+    ledOff();
+  } else {
+    if (isTxActive) {
+      ledTx();
+    } else {
+      ledIdle();
+    }
+  }
+  server.send(200, "text/plain", "OK");
+}
+#endif
 
 void handleReboot() {
   server.send(200, "text/plain", "Rebooting");
@@ -930,6 +1130,10 @@ void startWeb() {
   server.on("/save_wifi", HTTP_POST, handleSaveWifi);
   server.on("/save_ntp", HTTP_POST, handleSaveNtp);
   server.on("/save_wspr", HTTP_POST, handleSaveWspr);
+  server.on("/save_clk", HTTP_POST, handleSaveClk);
+#ifdef HAS_NEOPIXEL
+  server.on("/save_led", HTTP_POST, handleSaveLed);
+#endif
 
   server.on("/sync_time", HTTP_POST, handleSyncTime);
 
@@ -982,7 +1186,7 @@ void waitForNextSlot() {
 static inline void setTone(int tone) {
   const double cal = bandCalHz[bandIndex];
   double f = wsprBaseHz() + cal + sessionFreqOffsetHz + (tone * TONE_SPACING_HZ);
-  si5351.set_freq((uint64_t)(f * 100ULL), SI5351_CLK0);
+  si5351.set_freq((uint64_t)(f * 100ULL), (si5351_clock)bandClockOut[bandIndex]);
 }
 
 // ---------- TRANSMIT FRAME ----------
@@ -1044,10 +1248,12 @@ void setup() {
   Serial.begin(115200);
   delay(800);
 
+#ifdef HAS_NEOPIXEL
   rgb.begin();
   rgb.clear();
   rgb.show();
   ledOff();
+#endif
 
   loadSettings();
 
@@ -1060,7 +1266,7 @@ void setup() {
                 txEverySlot ? "EVERY" : "ALTERNATE");
   Serial.printf("NTP server: %s\n", ntpServer.c_str());
 
-  Wire.begin(8, 9);
+  Wire.begin(I2C_SDA, I2C_SCL);
 
   // Serial.println("Init Si5351...");
   // si5351.init(SI5351_CRYSTAL_LOAD_8PF, SI5351_CRYSTAL, 0);
@@ -1081,11 +1287,11 @@ si5351.init(SI5351_CRYSTAL_LOAD_8PF, SI5351_CRYSTAL, 0);
 si5351.pll_reset(SI5351_PLLA);
 si5351.pll_reset(SI5351_PLLB);
 
-// Set drive strength while still muted
-si5351.drive_strength(SI5351_CLK0, SI5351_DRIVE_8MA);
+// Set drive strength for selected clock
+si5351.drive_strength((si5351_clock)si5351Clock, SI5351_DRIVE_8MA);
 
 // Ensure frequency is zeroed
-si5351.set_freq(0, SI5351_CLK0);
+si5351.set_freq(0, (si5351_clock)si5351Clock);
 
 // Final safety mute
 rfOff();

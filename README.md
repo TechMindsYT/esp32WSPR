@@ -1,4 +1,4 @@
-# ESP32 WSPR Beacon 
+# ESP32 (and ESP8266) WSPR Beacon 
 This project is related to a Tech Minds video on how to build a WSPR beacon using an Si5351 and an ESP32 module. The files wihtin this repo are for use with Visual Studio Code.
 
 Like this project? Send me a dono here: https://buymeacoffee.com/techminds_matt  
@@ -14,6 +14,14 @@ US: https://amzn.to/49By4v1
 **2W RF Amplifier**  
 UK: https://amzn.to/4sHx9Ce  
 US:https://amzn.to/4jKjeHt  
+
+# Device connectivity to Si5351
+How to connect the Si5351 module to the various tested boards.
+
+* **ESP32-S3-N16R8** connect the Si5351 with SDA to pin 8 and SCL to pin 9.
+* **Generic ESP32-Wroom devkit** connect the Si5351 with SDA to 21 and SCL to pin 22.
+* **Generic ESP8266** connect the Si5351 with SDA to pin D2 and SCL pin D1.
+
 ## Usage
 Create a new PlatformIO project within Visual studio code, then replace main.cpp and platformio.ini with those in this repo. The board details wihtin the platformio.ini file are specific for the linked ESP32 module above.  
 

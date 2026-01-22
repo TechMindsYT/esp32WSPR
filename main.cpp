@@ -1,8 +1,16 @@
 #include <Arduino.h>
-#include <WiFi.h>
-#include <WebServer.h>
-#include <ESPmDNS.h>
-#include <Preferences.h>
+#ifdef ESP8266
+  #include <ESP8266WiFi.h>
+  #include <ESP8266WebServer.h>
+  #include <ESP8266mDNS.h>
+  #include <LittleFS.h>
+  #define WebServer ESP8266WebServer
+#else
+  #include <WiFi.h>
+  #include <WebServer.h>
+  #include <ESPmDNS.h>
+  #include <Preferences.h>
+#endif
 #include <Wire.h>
 #include <time.h>
 
@@ -29,7 +37,11 @@ Adafruit_NeoPixel rgb(1, LED_PIN, NEO_GRBW + NEO_KHZ800);
 #endif
 
 // ---------- HOSTNAME ----------
-static const char* HOSTNAME = "ESP32WSPR";   // -> http://ESP32WSPR.local/
+#ifdef ESP8266
+  static const char* HOSTNAME = "ESP8266WSPR";   // -> http://ESP8266WSPR.local/
+#else
+  static const char* HOSTNAME = "ESP32WSPR";   // -> http://ESP32WSPR.local/
+#endif
 
 // ---------- WSPR CONSTANTS ----------
 static const double TONE_SPACING_HZ = 1.4648;
@@ -39,8 +51,8 @@ static const uint32_t SYMBOL_PERIOD_US = 683000UL;
 static const uint32_t SI5351_CRYSTAL = 25000000UL;
 
 // ---------- DEFAULTS ----------
-static const char* DEFAULT_CALL = "M0DQW";
-static const char* DEFAULT_LOC  = "IO91";
+static const char* DEFAULT_CALL = "N0CALL";
+static const char* DEFAULT_LOC  = "ZZ00";
 static const uint8_t DEFAULT_PWR_DBM = 10;
 
 static const char* DEFAULT_NTP_SERVER = "pool.ntp.org";
@@ -69,7 +81,9 @@ JTEncode jt;
 uint8_t symbols[162];
 
 WebServer server(80);
+#ifndef ESP8266
 Preferences prefs;
+#endif
 
 // Captive portal DNS
 DNSServer dnsServer;
@@ -207,6 +221,38 @@ void loadSettings() {
     bandClockOut[i] = SI5351_CLK0;
   }
 
+#ifdef ESP8266
+  LittleFS.begin();
+  if (LittleFS.exists("/config.txt")) {
+    File f = LittleFS.open("/config.txt", "r");
+    if (f) {
+      wifiSsid = f.readStringUntil('\n'); wifiSsid.trim();
+      wifiPass = f.readStringUntil('\n'); wifiPass.trim();
+      CALLSIGN = f.readStringUntil('\n'); CALLSIGN.trim();
+      LOCATOR = f.readStringUntil('\n'); LOCATOR.trim();
+      POWER_DBM = f.readStringUntil('\n').toInt();
+      bandIndex = f.readStringUntil('\n').toInt();
+      if (bandIndex >= NUM_BANDS) bandIndex = 3;
+      for (size_t i = 0; i < NUM_BANDS; i++) {
+        bandCalHz[i] = f.readStringUntil('\n').toDouble();
+      }
+      for (size_t i = 0; i < NUM_BANDS; i++) {
+        bandClockOut[i] = f.readStringUntil('\n').toInt();
+      }
+      txEnabled = f.readStringUntil('\n').toInt();
+      txEverySlot = f.readStringUntil('\n').toInt();
+      si5351Clock = f.readStringUntil('\n').toInt();
+#ifdef HAS_NEOPIXEL
+      ledEnabled = f.readStringUntil('\n').toInt();
+#endif
+      ntpServer = f.readStringUntil('\n'); ntpServer.trim();
+      f.close();
+    }
+  }
+  if (CALLSIGN.isEmpty()) CALLSIGN = DEFAULT_CALL;
+  if (LOCATOR.isEmpty()) LOCATOR = DEFAULT_LOC;
+  if (ntpServer.isEmpty()) ntpServer = DEFAULT_NTP_SERVER;
+#else
   prefs.begin("esp32wspr", true);
 
   wifiSsid = prefs.getString("ssid", "");
@@ -242,9 +288,35 @@ void loadSettings() {
   ntpServer   = prefs.getString("ntp", DEFAULT_NTP_SERVER);
 
   prefs.end();
+#endif
 }
 
 void saveSettings() {
+#ifdef ESP8266
+  File f = LittleFS.open("/config.txt", "w");
+  if (f) {
+    f.println(wifiSsid);
+    f.println(wifiPass);
+    f.println(CALLSIGN);
+    f.println(LOCATOR);
+    f.println(POWER_DBM);
+    f.println(bandIndex);
+    for (size_t i = 0; i < NUM_BANDS; i++) {
+      f.println(bandCalHz[i], 1);
+    }
+    for (size_t i = 0; i < NUM_BANDS; i++) {
+      f.println(bandClockOut[i]);
+    }
+    f.println(txEnabled ? 1 : 0);
+    f.println(txEverySlot ? 1 : 0);
+    f.println(si5351Clock);
+#ifdef HAS_NEOPIXEL
+    f.println(ledEnabled ? 1 : 0);
+#endif
+    f.println(ntpServer);
+    f.close();
+  }
+#else
   prefs.begin("esp32wspr", false);
 
   prefs.putString("ssid", wifiSsid);
@@ -276,6 +348,7 @@ void saveSettings() {
   prefs.putString("ntp", ntpServer);
 
   prefs.end();
+#endif
 }
 
 // ---------- WIFI + NTP ----------
@@ -286,7 +359,11 @@ bool connectStaWithTimeout(uint32_t timeoutMs) {
   }
 
   WiFi.mode(WIFI_AP_STA);
+#ifdef ESP8266
+  WiFi.hostname(HOSTNAME);
+#else
   WiFi.setHostname(HOSTNAME);
+#endif
   WiFi.begin(wifiSsid.c_str(), wifiPass.c_str());
 
   Serial.printf("Connecting STA to '%s' (timeout %lus)\n", wifiSsid.c_str(), timeoutMs / 1000);
@@ -1296,10 +1373,11 @@ si5351.set_freq(0, (si5351_clock)si5351Clock);
 // Final safety mute
 rfOff();
 
-
-
-
+#ifndef ESP8266
   randomSeed((uint32_t)esp_random());
+#else
+  randomSeed(micros());
+#endif
 
   // Try STA for 30 seconds, else AP + captive portal
   bool staOk = connectStaWithTimeout(30000);
